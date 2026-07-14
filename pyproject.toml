@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "team-core"
-version = "0.17.0"
+version = "0.18.0"
 description = "Orchestrate a cluster of containerized local LLMs (via Ollama), each with a specific persona and role, that collaborate to solve a goal."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [{ name = "Fabio Cumbo" }]
 keywords = ["llm", "ollama", "multi-agent", "orchestration", "docker", "agents"]
 classifiers = [
@@ -24,6 +24,7 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "jinja2>=3.1",
+    "mcp>=1.9,<2",
 ]
 
 [project.optional-dependencies]

@@ -170,16 +170,13 @@ def _load_plugin_commands() -> None:
     Errors loading individual plugins are logged and skipped so one bad plugin
     does not prevent ``team`` from starting.
     """
-    try:
-        for ep in entry_points(group="team.commands"):
-            try:
-                cmd = ep.load()
-                cli.add_command(cmd, name=ep.name)
-                log.debug("cli: loaded plugin command %r from %s", ep.name, ep.value)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("cli: failed to load plugin command %r: %s", ep.name, exc)
-    except Exception:  # noqa: BLE001
-        pass  # importlib.metadata not available in very old environments
+    for ep in entry_points(group="team.commands"):
+        try:
+            cmd = ep.load()
+            cli.add_command(cmd, name=ep.name)
+            log.debug("cli: loaded plugin command %r from %s", ep.name, ep.value)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cli: failed to load plugin command %r: %s", ep.name, exc)
 
 
 _load_plugin_commands()
@@ -323,6 +320,25 @@ def _apply_host_ollama(cfg, url: str) -> None:
     cfg.defaults.ollama_url = url
 
 
+def _format_progress(event: dict) -> str:
+    """Render one docker-image or ollama-model pull event as a status line."""
+    status = event.get("status") or ""
+    current = event.get("current", event.get("completed"))
+    total = event.get("total")
+    pct = f" {int(current / total * 100)}%" if current is not None and total else ""
+    member = event.get("member")
+    label = f"@{member}" if member else "docker image"
+    return f"[bold blue]starting containers and pulling models…[/bold blue] [dim]({label}: {status}{pct})[/dim]"
+
+
+def _up_with_progress(orch: Orchestrator, console: Console, prepare_timeout: int = 300) -> None:
+    """Run ``orch.up()`` under a status spinner that reflects live pull progress."""
+    with console.status("[bold blue]starting containers and pulling models…[/bold blue]") as status:
+        def on_progress(event: dict) -> None:
+            status.update(_format_progress(event))
+        orch.up(prepare_deadline_seconds=prepare_timeout, on_progress=on_progress)
+
+
 # --------------------------------------------------------------------------- #
 # up / down / status
 # --------------------------------------------------------------------------- #
@@ -359,7 +375,7 @@ def up(team_file: str, prepare_timeout: int, no_gpu: bool, host_ollama: str | No
     elif no_gpu:
         _apply_no_gpu(cfg)
     orch = Orchestrator(cfg)
-    orch.up(prepare_deadline_seconds=prepare_timeout)
+    _up_with_progress(orch, console, prepare_timeout)
     console.print("[green]team is up[/green]")
     _print_status(orch)
 
@@ -701,8 +717,7 @@ def run(team_file: str, no_up: bool, keep_up: bool, prepare_timeout: int, resume
     if interactive:
         _setup_interactive(orch, console)
     if not no_up:
-        with console.status("[bold blue]starting containers and pulling models…[/bold blue]"):
-            orch.up(prepare_deadline_seconds=prepare_timeout)
+        _up_with_progress(orch, console, prepare_timeout)
         console.print("[green]✓[/green] team is up\n")
     else:
         runtimes = orch.containers.start_all()
@@ -1660,8 +1675,7 @@ def test_cmd(
         console.print(_rh)
         console.print(Text("  " + "─" * _SEP, style="bright_blue dim"))
         console.print()
-        with console.status("[bold blue]starting containers and pulling models…[/bold blue]"):
-            orch.up()
+        _up_with_progress(orch, console)
         console.print("[green]✓[/green] team is up\n")
         try:
             orch.run()
@@ -2207,11 +2221,11 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         f'description = "{ext_title} extensions for the team multi-agent LLM framework."\n'
         "readme = \"README.md\"\n"
         "license = { file = \"LICENSE\" }\n"
-        "requires-python = \">=3.9\"\n"
+        "requires-python = \">=3.10\"\n"
         "authors = [{ name = \"Your Name\" }]\n"
         f'keywords = ["llm", "{hyphen_name}", "multi-agent", "team"]\n'
         "dependencies = [\n"
-        "    \"team-core>=0.15.5\",\n"
+        "    \"team-core>=0.18.0\",\n"
         "    \"click>=8.1\",\n"
         "    \"rich>=13.0\",\n"
         "]\n"
@@ -2224,6 +2238,9 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "\n"
         "[project.entry-points.\"team.persona_dirs\"]\n"
         f'{ext_name} = "{pkg_name}:personas_dir"\n'
+        "\n"
+        "[project.entry-points.\"team.mcp_servers\"]\n"
+        f'# my_server = "{pkg_name}.servers.my_server:build"\n'
         "\n"
         "[project.entry-points.\"team.skills\"]\n"
         f'# my_skill = "{pkg_name}.skills.my_skill"\n'
@@ -2245,7 +2262,7 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "exclude = [\"tests*\", \"examples*\"]\n"
         "\n"
         "[tool.setuptools.package-data]\n"
-        f'{pkg_name} = ["skills/*.py", "skills/*.md", "personas/*.yaml", "examples/*.yaml"]\n'
+        f'{pkg_name} = ["servers/*.py", "skills/*.md", "personas/*.yaml", "examples/*.yaml"]\n'
     )
 
     init_py = (
@@ -2253,8 +2270,11 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "\n"
         "Extension points registered\n"
         "---------------------------\n"
+        "``team.mcp_servers``\n"
+        "    Named MCP servers usable in a team YAML via ``transport: entry_point``.\n"
+        "\n"
         "``team.skills``\n"
-        "    Short skill names usable anywhere in a team YAML ``skills:`` list.\n"
+        "    Named Markdown context bundles usable in a team YAML's ``extra_context:``.\n"
         "\n"
         "``team.persona_dirs``\n"
         f'    Personas in ``{pkg_name}/personas/`` are auto-discovered with the ``@name`` shorthand.\n'
@@ -2266,6 +2286,11 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "from __future__ import annotations\n"
         "\n"
         "from pathlib import Path\n"
+        "\n"
+        "\n"
+        "def servers_dir() -> Path:\n"
+        f'    """Return the absolute path to the {pkg_name} MCP servers directory."""\n'
+        "    return Path(__file__).parent / \"servers\"\n"
         "\n"
         "\n"
         "def skills_dir() -> Path:\n"
@@ -2283,7 +2308,7 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "    return Path(__file__).parent / \"examples\"\n"
         "\n"
         "\n"
-        "__all__ = [\"skills_dir\", \"personas_dir\", \"examples_dir\"]\n"
+        "__all__ = [\"servers_dir\", \"skills_dir\", \"personas_dir\", \"examples_dir\"]\n"
     )
 
     commands_py = (
@@ -2292,10 +2317,14 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "from __future__ import annotations\n"
         "\n"
         "from team.extension import make_extension_commands\n"
-        f'from {pkg_name} import examples_dir, personas_dir, skills_dir\n'
+        f'from {pkg_name} import examples_dir, personas_dir, servers_dir, skills_dir\n'
+        "\n"
+        "_SERVER_DESCRIPTIONS: dict[str, str] = {\n"
+        "    # \"my_server\": \"Exposes some useful tools.\",\n"
+        "}\n"
         "\n"
         "_SKILL_DESCRIPTIONS: dict[str, str] = {\n"
-        "    # \"my_skill\": \"Does something useful.\",\n"
+        "    # \"my_skill\": \"Context injected into some persona.\",\n"
         "}\n"
         "\n"
         "_SCENARIO_DESCRIPTIONS: dict[str, str] = {\n"
@@ -2306,9 +2335,11 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         f'    package_name="team-{hyphen_name}",\n'
         f'    group_name="{ext_name}",\n'
         f'    description="{ext_title} extensions for the team multi-agent framework.",\n'
+        "    servers_dir=servers_dir,\n"
         "    skills_dir=skills_dir,\n"
         "    personas_dir=personas_dir,\n"
         "    examples_dir=examples_dir,\n"
+        "    server_descriptions=_SERVER_DESCRIPTIONS,\n"
         "    skill_descriptions=_SKILL_DESCRIPTIONS,\n"
         "    scenario_descriptions=_SCENARIO_DESCRIPTIONS,\n"
         ")\n"
@@ -2325,8 +2356,12 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "import yaml\n"
         "from click.testing import CliRunner\n"
         "\n"
-        f'from {pkg_name} import examples_dir, personas_dir, skills_dir\n'
+        f'from {pkg_name} import examples_dir, personas_dir, servers_dir, skills_dir\n'
         f'from {pkg_name}.commands import {ext_name}\n'
+        "\n"
+        "\n"
+        "def test_servers_dir_exists():\n"
+        "    assert servers_dir().is_dir()\n"
         "\n"
         "\n"
         "def test_skills_dir_exists():\n"
@@ -2376,6 +2411,11 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "    assert result.exit_code == 0\n"
         "\n"
         "\n"
+        "def test_cli_servers():\n"
+        f'    result = CliRunner().invoke({ext_name}, ["servers"])\n'
+        "    assert result.exit_code == 0\n"
+        "\n"
+        "\n"
         "def test_cli_skills():\n"
         f'    result = CliRunner().invoke({ext_name}, ["skills"])\n'
         "    assert result.exit_code == 0\n"
@@ -2414,12 +2454,21 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "team run <scenario-name>.yaml\n"
         "```\n"
         "\n"
-        "## Skills\n"
+        "## MCP servers\n"
+        "\n"
+        "```yaml\n"
+        "mcp_servers:\n"
+        "  my_server:\n"
+        "    transport: entry_point\n"
+        f'    entry_point: {ext_name}_my_server   # registered via team.mcp_servers\n'
+        "```\n"
+        "\n"
+        "## Skills (Markdown context)\n"
         "\n"
         "```yaml\n"
         "defaults:\n"
-        "  skills:\n"
-        "    - my_skill\n"
+        "  extra_context:\n"
+        "    - my_skill   # registered via team.skills\n"
         "```\n"
         "\n"
         "## Personas\n"
@@ -2434,7 +2483,8 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "\n"
         "```\n"
         "team-core plugin API\n"
-        f'|- team.skills          <- registered skill names\n'
+        f'|- team.mcp_servers     <- registered MCP servers\n'
+        f'|- team.skills          <- registered Markdown context bundles\n'
         f'|- team.persona_dirs    <- {pkg_name}/personas/ (auto-merged)\n'
         f'`- team.commands        <- team {ext_name} <subcommand>\n'
         "```\n"
@@ -2485,6 +2535,7 @@ def _forge_files(dir_name: str, pkg_name: str, ext_name: str) -> dict[str, str]:
         "pyproject.toml": pyproject,
         f"{pkg_name}/__init__.py": init_py,
         f"{pkg_name}/commands.py": commands_py,
+        f"{pkg_name}/servers/.gitkeep": "",
         f"{pkg_name}/skills/.gitkeep": "",
         f"{pkg_name}/personas/.gitkeep": "",
         f"{pkg_name}/examples/.gitkeep": "",
@@ -2518,9 +2569,10 @@ def forge(name: str, output_dir: str, force: bool) -> None:
     team-<name>/
       pyproject.toml          entry points pre-wired, version 0.1.0
       team_<name>/
-        __init__.py           skills_dir / personas_dir / examples_dir helpers
+        __init__.py           servers_dir / skills_dir / personas_dir / examples_dir helpers
         commands.py           make_extension_commands() call
-        skills/               drop .py and .md skill files here
+        servers/              drop FastMCP server modules here
+        skills/               drop Markdown context files here
         personas/             drop persona YAML files here
         examples/             drop scenario YAML templates here
       tests/
